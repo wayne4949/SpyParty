@@ -6,13 +6,12 @@ import PlayerList from './PlayerList';
 import { useLang } from '@/lib/LangContext';
 
 export default function SpeakingPhase({ room, players, myPlayer, isHost, onGoToVoting }) {
-  const { t, lang } = useLang();
+  const { t } = useLang();
 
   const getDisplayWord = () => {
     if (!myPlayer?.is_alive) return t.eliminated;
-    const wordObj = myPlayer?.role === 'spy' ? room.spy_word : room.civilian_word;
-    if (!wordObj) return '...';
-    return wordObj[lang] || wordObj['zh'] || '...';
+    // ✅ 只讀自己的 assigned_word，不從 room 讀詞，防止洩漏
+    return myPlayer?.assigned_word || '...';
   };
 
   return (
@@ -22,7 +21,6 @@ export default function SpeakingPhase({ room, players, myPlayer, isHost, onGoToV
         animate={{ opacity: 1, y: 0 }}
         className="flex-1 max-w-sm mx-auto w-full space-y-6"
       >
-        {/* Title */}
         <div className="text-center space-y-1">
           <p className="text-sm text-muted-foreground uppercase tracking-widest">
             {t.round} {room.current_round || 1}{t.roundSuffix && ` ${t.roundSuffix}`}
@@ -30,7 +28,7 @@ export default function SpeakingPhase({ room, players, myPlayer, isHost, onGoToV
           <h2 className="text-xl font-bold">{t.speakingPhase}</h2>
         </div>
 
-        {/* Your Word Card */}
+        {/* 你的詞 - 只顯示自己的 assigned_word */}
         <motion.div
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
@@ -43,26 +41,18 @@ export default function SpeakingPhase({ room, players, myPlayer, isHost, onGoToV
           </p>
         </motion.div>
 
-        {/* Instructions */}
         <div className="flex items-center gap-3 p-4 rounded-xl bg-secondary/50">
           <MessageCircle className="w-5 h-5 text-muted-foreground shrink-0" />
-          <p className="text-sm text-muted-foreground">
-            {t.speakingInstruction}
-          </p>
+          <p className="text-sm text-muted-foreground">{t.speakingInstruction}</p>
         </div>
 
-        {/* Players */}
         <div className="space-y-2">
           <p className="text-sm font-medium text-muted-foreground">{t.alivePlayers}</p>
           <PlayerList players={players} hostId={room.host_id} myUserId={myPlayer?.user_id} showStatus={true} />
         </div>
 
-        {/* Host voting button */}
         {isHost && (
-          <Button
-            onClick={onGoToVoting}
-            className="w-full h-14 text-base font-bold rounded-xl"
-          >
+          <Button onClick={onGoToVoting} className="w-full h-14 text-base font-bold rounded-xl">
             <Vote className="w-5 h-5 mr-2" />
             {t.startVoting}
           </Button>

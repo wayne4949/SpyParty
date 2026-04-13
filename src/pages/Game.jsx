@@ -32,7 +32,7 @@ export default function Game() {
   const [showAd, setShowAd] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
   const [startingGame, setStartingGame] = useState(false);
-  const { t } = useLang();
+  const { t, lang } = useLang();
 
   const roomRef = useRef(null);
   const playersRef = useRef([]);
@@ -73,120 +73,92 @@ export default function Game() {
 
     const channel = supabase
       .channel(`game-${roomId}`)
-
-      // rooms 變更
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` },
-        (payload) => {
-          if (payload.eventType === 'DELETE' || payload.new?.game_status === 'cancelled') {
-            if (!isHostRef.current) {
-              alert(t.hostLeft);
-              navigate('/');
-            }
-            return;
+      .on('postgres_changes', {
+        event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}`
+      }, (payload) => {
+        if (payload.eventType === 'DELETE' || payload.new?.game_status === 'cancelled') {
+          if (!isHostRef.current) { alert(t.hostLeft); navigate('/'); }
+          return;
+        }
+        if (payload.new) { setRoom(payload.new); roomRef.current = payload.new; }
+      })
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'players', filter: `room_id=eq.${roomId}`
+      }, (payload) => {
+        setPlayers(prev => {
+          if (prev.find(p => p.id === payload.new.id)) return prev;
+          const next = [...prev, payload.new];
+          playersRef.current = next;
+          return next;
+        });
+      })
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'players', filter: `room_id=eq.${roomId}`
+      }, (payload) => {
+        setPlayers(prev => {
+          const next = prev.map(p => p.id === payload.new.id ? payload.new : p);
+          playersRef.current = next;
+          return next;
+        });
+        if (payload.new.user_id === myGuestId) setMyPlayer(payload.new);
+      })
+      .on('postgres_changes', {
+        event: 'DELETE', schema: 'public', table: 'players', filter: `room_id=eq.${roomId}`
+      }, (payload) => {
+        setPlayers(prev => {
+          const next = prev.filter(p => p.id !== payload.old.id);
+          playersRef.current = next;
+          const activeStatuses = ['speaking', 'voting', 'assigning'];
+          if (isHostRef.current && activeStatuses.includes(roomRef.current?.game_status) && next.length < 4) {
+            supabase.from('rooms').update({ game_status: 'cancelled' }).eq('id', roomRef.current.id);
           }
-          if (payload.new) {
-            setRoom(payload.new);
-            roomRef.current = payload.new;
-          }
-        }
-      )
-
-      // players 變更
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'players', filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          setPlayers(prev => {
-            if (prev.find(p => p.id === payload.new.id)) return prev;
-            const next = [...prev, payload.new];
-            playersRef.current = next;
-            return next;
-          });
-        }
-      )
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'players', filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          setPlayers(prev => {
-            const next = prev.map(p => p.id === payload.new.id ? payload.new : p);
-            playersRef.current = next;
-            return next;
-          });
-          if (payload.new.user_id === myGuestId) setMyPlayer(payload.new);
-        }
-      )
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'players', filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          setPlayers(prev => {
-            const next = prev.filter(p => p.id !== payload.old.id);
-            playersRef.current = next;
-
-            // 遊戲中人數不足 → 取消房間
-            const activeStatuses = ['speaking', 'voting', 'assigning'];
-            if (
-              isHostRef.current &&
-              activeStatuses.includes(roomRef.current?.game_status) &&
-              next.length < 4
-            ) {
-              supabase.from('rooms').update({ game_status: 'cancelled' }).eq('id', roomRef.current.id);
-            }
-
-            return next;
-          });
-        }
-      )
-
-      // votes 變更
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes', filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          setVotes(prev => {
-            if (prev.find(v => v.id === payload.new.id)) return prev;
-            return [...prev, payload.new];
-          });
-        }
-      )
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'votes', filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          setVotes(prev => prev.filter(v => v.id !== payload.old.id));
-        }
-      )
-
+          return next;
+        });
+      })
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'votes', filter: `room_id=eq.${roomId}`
+      }, (payload) => {
+        setVotes(prev => {
+          if (prev.find(v => v.id === payload.new.id)) return prev;
+          return [...prev, payload.new];
+        });
+      })
+      .on('postgres_changes', {
+        event: 'DELETE', schema: 'public', table: 'votes', filter: `room_id=eq.${roomId}`
+      }, (payload) => {
+        setVotes(prev => prev.filter(v => v.id !== payload.old.id));
+      })
       .subscribe();
 
     return () => supabase.removeChannel(channel);
   }, [roomId]);
 
   const isHost = !!(myGuestId && room && room.host_id === myGuestId);
-
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
 
   // ─── 3. 離開時清理 ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!myPlayer || !room) return;
-
     const handleUnload = () => {
-      if (myPlayer?.id) {
-        supabase.from('players').delete().eq('id', myPlayer.id);
-      }
+      if (myPlayer?.id) supabase.from('players').delete().eq('id', myPlayer.id);
       if (isHostRef.current && room?.id) {
         supabase.from('rooms').update({ game_status: 'cancelled' }).eq('id', room.id);
       }
     };
-
     window.addEventListener('beforeunload', handleUnload);
     return () => window.removeEventListener('beforeunload', handleUnload);
   }, [myPlayer?.id, room?.id]);
 
-  // ─── 4. 動態勝負判定（玩家斷線時） ─────────────────────────────────────────
+  // ─── 4. 動態勝負判定 ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isHost || !room) return;
     const status = room.game_status;
     if (status !== 'speaking' && status !== 'voting') return;
-
     const alivePlayers = players.filter(p => p.is_alive);
     const aliveSpies = alivePlayers.filter(p => p.role === 'spy').length;
     const aliveCivilians = alivePlayers.filter(p => p.role === 'civilian').length;
-
     if (alivePlayers.some(p => p.role === 'unassigned')) return;
     if (alivePlayers.length === 0) return;
-
     if (aliveSpies === 0) {
       supabase.from('rooms').update({ game_status: 'game_over', winner: 'civilians' }).eq('id', room.id);
     } else if (aliveSpies >= aliveCivilians) {
@@ -207,20 +179,25 @@ export default function Game() {
     const shuffled = shuffleArray(players);
     const spyIds = shuffled.slice(0, spyCount).map(p => p.id);
 
-    // 批次更新玩家角色
+    // ✅ 每個玩家的詞寫進自己的 assigned_word，不暴露給其他人
     await Promise.all(
-      players.map(p =>
-        supabase.from('players').update({
-          role: spyIds.includes(p.id) ? 'spy' : 'civilian',
+      players.map(p => {
+        const isSpy = spyIds.includes(p.id);
+        const word = isSpy
+          ? (spy_word[lang] || spy_word['zh'])
+          : (civilian_word[lang] || civilian_word['zh']);
+        return supabase.from('players').update({
+          role: isSpy ? 'spy' : 'civilian',
           is_alive: true,
-        }).eq('id', p.id)
-      )
+          assigned_word: word,
+        }).eq('id', p.id);
+      })
     );
 
     await supabase.from('rooms').update({
       game_status: 'speaking',
-      civilian_word,
-      spy_word,
+      civilian_word,   // 保留供 GameOver 揭曉用
+      spy_word,        // 保留供 GameOver 揭曉用
       played_word_ids: new_played_word_ids,
       current_round: 1,
       winner: '',
@@ -236,7 +213,6 @@ export default function Game() {
   const handleVoteComplete = useCallback(async (roundVotes) => {
     if (!isHostRef.current) return;
 
-    // 計票
     const tally = {};
     roundVotes.forEach(v => { tally[v.target_id] = (tally[v.target_id] || 0) + 1; });
     const maxVotes = Math.max(...Object.values(tally));
@@ -245,9 +221,7 @@ export default function Game() {
     if (topTargets.length === 1) {
       await supabase.from('players').update({ is_alive: false }).eq('id', topTargets[0]);
     }
-    // 平票 → 沒人被淘汰
 
-    // 重新讀取最新玩家狀態判斷勝負
     const { data: updatedPlayers } = await supabase
       .from('players').select('*').eq('room_id', roomRef.current.id);
 
@@ -259,7 +233,6 @@ export default function Game() {
     } else if (aliveSpies >= aliveCivilians) {
       await supabase.from('rooms').update({ game_status: 'game_over', winner: 'spies' }).eq('id', roomRef.current.id);
     } else {
-      // 繼續下一輪，先顯示廣告
       setPendingAction('speaking');
       setShowAd(true);
     }
@@ -268,14 +241,8 @@ export default function Game() {
   const handleAdComplete = useCallback(async () => {
     setShowAd(false);
     if (pendingAction === 'speaking' && isHostRef.current) {
-      // 清除本輪選票
-      const { data: oldVotes } = await supabase
-        .from('votes').select('id').eq('room_id', roomRef.current.id);
-      if (oldVotes?.length) {
-        await supabase.from('votes').delete().eq('room_id', roomRef.current.id);
-      }
+      await supabase.from('votes').delete().eq('room_id', roomRef.current.id);
       setVotes([]);
-
       await supabase.from('rooms').update({
         game_status: 'speaking',
         current_round: (roomRef.current.current_round || 1) + 1,
@@ -288,7 +255,6 @@ export default function Game() {
   const handlePlayAgain = async () => {
     if (!isHost) return;
 
-    // 清票
     await supabase.from('votes').delete().eq('room_id', room.id);
     setVotes([]);
 
@@ -300,12 +266,17 @@ export default function Game() {
     const spyIds = shuffled.slice(0, spyCount).map(p => p.id);
 
     await Promise.all(
-      players.map(p =>
-        supabase.from('players').update({
-          role: spyIds.includes(p.id) ? 'spy' : 'civilian',
+      players.map(p => {
+        const isSpy = spyIds.includes(p.id);
+        const word = isSpy
+          ? (spy_word[lang] || spy_word['zh'])
+          : (civilian_word[lang] || civilian_word['zh']);
+        return supabase.from('players').update({
+          role: isSpy ? 'spy' : 'civilian',
           is_alive: true,
-        }).eq('id', p.id)
-      )
+          assigned_word: word,
+        }).eq('id', p.id);
+      })
     );
 
     await supabase.from('rooms').update({
@@ -336,44 +307,22 @@ export default function Game() {
       <InterstitialAd show={showAd} onComplete={handleAdComplete} />
 
       {room.game_status === 'lobby' && (
-        <LobbyPhase
-          room={room}
-          players={players}
-          isHost={isHost}
-          myPlayer={myPlayer}
-          onStartGame={handleStartGame}
-          startingGame={startingGame}
-        />
+        <LobbyPhase room={room} players={players} isHost={isHost}
+          myPlayer={myPlayer} onStartGame={handleStartGame} startingGame={startingGame} />
       )}
 
       {(room.game_status === 'speaking' || room.game_status === 'assigning') && (
-        <SpeakingPhase
-          room={room}
-          players={players}
-          myPlayer={myPlayer}
-          isHost={isHost}
-          onGoToVoting={handleGoToVoting}
-        />
+        <SpeakingPhase room={room} players={players} myPlayer={myPlayer}
+          isHost={isHost} onGoToVoting={handleGoToVoting} />
       )}
 
       {room.game_status === 'voting' && (
-        <VotingPhase
-          room={room}
-          players={players}
-          myPlayer={myPlayer}
-          allVotes={votes}
-          onVoteComplete={handleVoteComplete}
-          isHost={isHost}
-        />
+        <VotingPhase room={room} players={players} myPlayer={myPlayer}
+          allVotes={votes} onVoteComplete={handleVoteComplete} isHost={isHost} />
       )}
 
       {room.game_status === 'game_over' && (
-        <GameOverPhase
-          room={room}
-          players={players}
-          isHost={isHost}
-          onPlayAgain={handlePlayAgain}
-        />
+        <GameOverPhase room={room} players={players} isHost={isHost} onPlayAgain={handlePlayAgain} />
       )}
     </>
   );
