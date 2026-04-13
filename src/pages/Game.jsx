@@ -171,37 +171,43 @@ export default function Game() {
     if (!isHost || startingGame) return;
     setStartingGame(true);
 
-    const { civilian_word, spy_word, new_played_word_ids } = assignNewWords({
-      played_word_ids: room.played_word_ids || [],
-    });
+    try {
+      const { civilian_word, spy_word, new_played_word_ids } = assignNewWords({
+        played_word_ids: room.played_word_ids || [],
+      });
 
-    const spyCount = getSpyCount(players.length);
-    const shuffled = shuffleArray(players);
-    const spyIds = shuffled.slice(0, spyCount).map(p => p.id);
+      const spyCount = getSpyCount(players.length);
+      const shuffled = shuffleArray(players);
+      const spyIds = shuffled.slice(0, spyCount).map(p => p.id);
 
-    // ✅ 每個玩家的詞寫進自己的 assigned_word，不暴露給其他人
-    await Promise.all(
-      players.map(p => {
-        const isSpy = spyIds.includes(p.id);
-        const word = isSpy
-          ? (spy_word[lang] || spy_word['zh'])
-          : (civilian_word[lang] || civilian_word['zh']);
-        return supabase.from('players').update({
-          role: isSpy ? 'spy' : 'civilian',
-          is_alive: true,
-          assigned_word: word,
-        }).eq('id', p.id);
-      })
-    );
+      await Promise.all(
+        players.map(p => {
+          const isSpy = spyIds.includes(p.id);
+          const word = isSpy
+            ? (spy_word[lang] || spy_word['zh'])
+            : (civilian_word[lang] || civilian_word['zh']);
+          return supabase.from('players').update({
+            role: isSpy ? 'spy' : 'civilian',
+            is_alive: true,
+            assigned_word: word,
+          }).eq('id', p.id);
+        })
+      );
 
-    await supabase.from('rooms').update({
-      game_status: 'speaking',
-      civilian_word,   // 保留供 GameOver 揭曉用
-      spy_word,        // 保留供 GameOver 揭曉用
-      played_word_ids: new_played_word_ids,
-      current_round: 1,
-      winner: '',
-    }).eq('id', room.id);
+      await supabase.from('rooms').update({
+        game_status: 'speaking',
+        civilian_word,
+        spy_word,
+        played_word_ids: new_played_word_ids,
+        current_round: 1,
+        winner: '',
+      }).eq('id', room.id);
+    } catch (e) {
+      console.error('Start game error:', e);
+    } finally {
+      // ✅ 修復：無論成功或失敗都重置，避免按鈕永久 disable
+      setStartingGame(false);
+    }
   };
 
   const handleGoToVoting = async () => {
@@ -213,12 +219,25 @@ export default function Game() {
   const handleVoteComplete = useCallback(async (roundVotes) => {
     if (!isHostRef.current) return;
 
+    // ✅ 修復：空票時不 crash
+    if (roundVotes.length === 0) {
+      // 沒人投票，直接進下一輪
+      await supabase.from('votes').delete().eq('room_id', roomRef.current.id);
+      await supabase.from('rooms').update({
+        game_status: 'speaking',
+        current_round: (roomRef.current.current_round || 1) + 1,
+      }).eq('id', roomRef.current.id);
+      return;
+    }
+
     const tally = {};
     roundVotes.forEach(v => { tally[v.target_id] = (tally[v.target_id] || 0) + 1; });
     const maxVotes = Math.max(...Object.values(tally));
     const topTargets = Object.keys(tally).filter(id => tally[id] === maxVotes);
 
-    if (topTargets.length === 1) {
+    let isTie = topTargets.length > 1;
+
+    if (!isTie) {
       await supabase.from('players').update({ is_alive: false }).eq('id', topTargets[0]);
     }
 
@@ -233,16 +252,15 @@ export default function Game() {
     } else if (aliveSpies >= aliveCivilians) {
       await supabase.from('rooms').update({ game_status: 'game_over', winner: 'spies' }).eq('id', roomRef.current.id);
     } else {
-      setPendingAction('speaking');
+      setPendingAction(isTie ? 'tie' : 'speaking');
       setShowAd(true);
     }
   }, []);
 
   const handleAdComplete = useCallback(async () => {
     setShowAd(false);
-    if (pendingAction === 'speaking' && isHostRef.current) {
+    if ((pendingAction === 'speaking' || pendingAction === 'tie') && isHostRef.current) {
       await supabase.from('votes').delete().eq('room_id', roomRef.current.id);
-      setVotes([]);
       await supabase.from('rooms').update({
         game_status: 'speaking',
         current_round: (roomRef.current.current_round || 1) + 1,
