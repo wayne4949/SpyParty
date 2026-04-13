@@ -1,0 +1,78 @@
+{
+  "name": "Room",
+  "type": "object",
+  "rls": {
+    "create": true,
+    "read": true,
+    "update": true,
+    "delete": true
+  },
+  "properties": {
+    "room_code": {
+      "type": "string",
+      "description": "4-digit room code"
+    },
+    "host_id": {
+      "type": "string",
+      "description": "Player ID of the host"
+    },
+    "game_status": {
+      "type": "string",
+      "enum": [
+        "lobby",
+        "assigning",
+        "speaking",
+        "voting",
+        "game_over",
+        "cancelled"
+      ],
+      "default": "lobby",
+      "description": "Current game state"
+    },
+    "civilian_word": {
+      "type": "object",
+      "description": "Word object assigned to civilians: { zh, en }",
+      "properties": {
+        "zh": {
+          "type": "string"
+        },
+        "en": {
+          "type": "string"
+        }
+      }
+    },
+    "spy_word": {
+      "type": "object",
+      "description": "Word object assigned to spies: { zh, en }",
+      "properties": {
+        "zh": {
+          "type": "string"
+        },
+        "en": {
+          "type": "string"
+        }
+      }
+    },
+    "played_word_ids": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "default": [],
+      "description": "IDs of word pairs already played in this room"
+    },
+    "winner": {
+      "type": "string",
+      "description": "Winner of the game: spies or civilians"
+    },
+    "current_round": {
+      "type": "number",
+      "default": 1,
+      "description": "Current round number"
+    }
+  },
+  "required": [
+    "room_code",
+    "host_id"
+  ]
+}

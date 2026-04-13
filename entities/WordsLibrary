@@ -1,0 +1,18 @@
+{
+  "name": "WordsLibrary",
+  "type": "object",
+  "properties": {
+    "word_a": {
+      "type": "string",
+      "description": "The civilian word"
+    },
+    "word_b": {
+      "type": "string",
+      "description": "The spy word"
+    }
+  },
+  "required": [
+    "word_a",
+    "word_b"
+  ]
+}

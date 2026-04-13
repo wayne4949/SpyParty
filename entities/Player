@@ -1,0 +1,53 @@
+{
+  "name": "Player",
+  "type": "object",
+  "rls": {
+    "create": true,
+    "read": true,
+    "update": true,
+    "delete": true
+  },
+  "properties": {
+    "room_id": {
+      "type": "string",
+      "description": "ID of the room"
+    },
+    "username": {
+      "type": "string",
+      "description": "Display name"
+    },
+    "user_id": {
+      "type": "string",
+      "description": "Auth user identifier"
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "civilian",
+        "spy",
+        "unassigned"
+      ],
+      "default": "unassigned",
+      "description": "Player role"
+    },
+    "assigned_word": {
+      "type": "string",
+      "description": "The word assigned to this player"
+    },
+    "is_alive": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether player is still in the game"
+    },
+    "is_host": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether this player is the host"
+    }
+  },
+  "required": [
+    "room_id",
+    "username",
+    "user_id"
+  ]
+}

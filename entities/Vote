@@ -1,0 +1,34 @@
+{
+  "name": "Vote",
+  "type": "object",
+  "rls": {
+    "create": true,
+    "read": true,
+    "update": true,
+    "delete": true
+  },
+  "properties": {
+    "room_id": {
+      "type": "string",
+      "description": "ID of the room"
+    },
+    "round_number": {
+      "type": "number",
+      "description": "Round number"
+    },
+    "voter_id": {
+      "type": "string",
+      "description": "Player ID of the voter"
+    },
+    "target_id": {
+      "type": "string",
+      "description": "Player ID of the vote target"
+    }
+  },
+  "required": [
+    "room_id",
+    "round_number",
+    "voter_id",
+    "target_id"
+  ]
+}
