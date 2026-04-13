@@ -37,6 +37,8 @@ export default function Game() {
   const roomRef = useRef(null);
   const playersRef = useRef([]);
   const isHostRef = useRef(false);
+  const presenceChannelRef = useRef(null);
+  const heartbeatRef = useRef(null);
 
   // ─── 1. 初始載入 ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -133,13 +135,90 @@ export default function Game() {
     return () => supabase.removeChannel(channel);
   }, [roomId]);
 
-  const isHost = !!(myGuestId && room && room.host_id === myGuestId);
-  useEffect(() => { isHostRef.current = isHost; }, [isHost]);
+  // ─── 3. Presence：房主心跳 + 離線偵測 ──────────────────────────────────────
+  useEffect(() => {
+    if (!roomId || !myGuestId) return;
 
-  // ─── 3. 離開時清理 ──────────────────────────────────────────────────────────
+    // 建立 Presence channel
+    const presenceChannel = supabase.channel(`presence-${roomId}`, {
+      config: { presence: { key: myGuestId } }
+    });
+
+    presenceChannel
+      .on('presence', { event: 'join' }, ({ key }) => {
+        // 有人加入，不需要特別處理
+      })
+      .on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
+        // ✅ 偵測房主離線：如果離開的是房主且不是自己
+        const leavingUserId = key;
+        const currentRoom = roomRef.current;
+        if (
+          currentRoom &&
+          leavingUserId === currentRoom.host_id &&
+          leavingUserId !== myGuestId &&
+          currentRoom.game_status !== 'game_over' &&
+          currentRoom.game_status !== 'cancelled'
+        ) {
+          // 房主離線，標記房間取消
+          supabase.from('rooms')
+            .update({ game_status: 'cancelled' })
+            .eq('id', currentRoom.id);
+        }
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          // Track 自己的存在
+          await presenceChannel.track({
+            user_id: myGuestId,
+            online_at: new Date().toISOString(),
+          });
+        }
+      });
+
+    presenceChannelRef.current = presenceChannel;
+
+    // ✅ 心跳：每 30 秒更新 host_last_seen（安全網用）
+    if (isHostRef.current) {
+      const updateHeartbeat = () => {
+        supabase.from('rooms')
+          .update({ host_last_seen: new Date().toISOString() })
+          .eq('id', roomId);
+      };
+      updateHeartbeat();
+      heartbeatRef.current = setInterval(updateHeartbeat, 30000);
+    }
+
+    return () => {
+      supabase.removeChannel(presenceChannel);
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+    };
+  }, [roomId, myGuestId]);
+
+  const isHost = !!(myGuestId && room && room.host_id === myGuestId);
+  useEffect(() => {
+    isHostRef.current = isHost;
+    // 當確認自己是房主後，啟動心跳
+    if (isHost && roomId && !heartbeatRef.current) {
+      const updateHeartbeat = () => {
+        supabase.from('rooms')
+          .update({ host_last_seen: new Date().toISOString() })
+          .eq('id', roomId);
+      };
+      updateHeartbeat();
+      heartbeatRef.current = setInterval(updateHeartbeat, 30000);
+    }
+  }, [isHost]);
+
+  // ─── 4. 離開時清理 ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!myPlayer || !room) return;
     const handleUnload = () => {
+      // 停止心跳
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+      // 離開 Presence（讓其他人偵測到）
+      if (presenceChannelRef.current) {
+        presenceChannelRef.current.untrack();
+      }
       if (myPlayer?.id) supabase.from('players').delete().eq('id', myPlayer.id);
       if (isHostRef.current && room?.id) {
         supabase.from('rooms').update({ game_status: 'cancelled' }).eq('id', room.id);
@@ -149,7 +228,7 @@ export default function Game() {
     return () => window.removeEventListener('beforeunload', handleUnload);
   }, [myPlayer?.id, room?.id]);
 
-  // ─── 4. 動態勝負判定 ────────────────────────────────────────────────────────
+  // ─── 5. 動態勝負判定 ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isHost || !room) return;
     const status = room.game_status;
@@ -166,7 +245,7 @@ export default function Game() {
     }
   }, [players, isHost, room?.game_status]);
 
-  // ─── 5. 開始遊戲 ────────────────────────────────────────────────────────────
+  // ─── 6. 開始遊戲 ────────────────────────────────────────────────────────────
   const handleStartGame = async () => {
     if (!isHost || startingGame) return;
     setStartingGame(true);
@@ -205,7 +284,6 @@ export default function Game() {
     } catch (e) {
       console.error('Start game error:', e);
     } finally {
-      // ✅ 修復：無論成功或失敗都重置，避免按鈕永久 disable
       setStartingGame(false);
     }
   };
@@ -215,13 +293,11 @@ export default function Game() {
     await supabase.from('rooms').update({ game_status: 'voting' }).eq('id', room.id);
   };
 
-  // ─── 6. 計票結算 ────────────────────────────────────────────────────────────
+  // ─── 7. 計票結算 ────────────────────────────────────────────────────────────
   const handleVoteComplete = useCallback(async (roundVotes) => {
     if (!isHostRef.current) return;
 
-    // ✅ 修復：空票時不 crash
     if (roundVotes.length === 0) {
-      // 沒人投票，直接進下一輪
       await supabase.from('votes').delete().eq('room_id', roomRef.current.id);
       await supabase.from('rooms').update({
         game_status: 'speaking',
@@ -234,8 +310,7 @@ export default function Game() {
     roundVotes.forEach(v => { tally[v.target_id] = (tally[v.target_id] || 0) + 1; });
     const maxVotes = Math.max(...Object.values(tally));
     const topTargets = Object.keys(tally).filter(id => tally[id] === maxVotes);
-
-    let isTie = topTargets.length > 1;
+    const isTie = topTargets.length > 1;
 
     if (!isTie) {
       await supabase.from('players').update({ is_alive: false }).eq('id', topTargets[0]);
@@ -269,7 +344,7 @@ export default function Game() {
     setPendingAction(null);
   }, [pendingAction]);
 
-  // ─── 7. 再玩一局 ────────────────────────────────────────────────────────────
+  // ─── 8. 再玩一局 ────────────────────────────────────────────────────────────
   const handlePlayAgain = async () => {
     if (!isHost) return;
 
