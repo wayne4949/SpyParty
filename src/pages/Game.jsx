@@ -139,27 +139,20 @@ export default function Game() {
   useEffect(() => {
     if (!roomId || !myGuestId) return;
 
-    // 建立 Presence channel
     const presenceChannel = supabase.channel(`presence-${roomId}`, {
       config: { presence: { key: myGuestId } }
     });
 
     presenceChannel
-      .on('presence', { event: 'join' }, ({ key }) => {
-        // 有人加入，不需要特別處理
-      })
-      .on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
-        // ✅ 偵測房主離線：如果離開的是房主且不是自己
-        const leavingUserId = key;
+      .on('presence', { event: 'leave' }, ({ key }) => {
         const currentRoom = roomRef.current;
         if (
           currentRoom &&
-          leavingUserId === currentRoom.host_id &&
-          leavingUserId !== myGuestId &&
+          key === currentRoom.host_id &&
+          key !== myGuestId &&
           currentRoom.game_status !== 'game_over' &&
           currentRoom.game_status !== 'cancelled'
         ) {
-          // 房主離線，標記房間取消
           supabase.from('rooms')
             .update({ game_status: 'cancelled' })
             .eq('id', currentRoom.id);
@@ -167,7 +160,6 @@ export default function Game() {
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
-          // Track 自己的存在
           await presenceChannel.track({
             user_id: myGuestId,
             online_at: new Date().toISOString(),
@@ -176,17 +168,6 @@ export default function Game() {
       });
 
     presenceChannelRef.current = presenceChannel;
-
-    // ✅ 心跳：每 30 秒更新 host_last_seen（安全網用）
-    if (isHostRef.current) {
-      const updateHeartbeat = () => {
-        supabase.from('rooms')
-          .update({ host_last_seen: new Date().toISOString() })
-          .eq('id', roomId);
-      };
-      updateHeartbeat();
-      heartbeatRef.current = setInterval(updateHeartbeat, 30000);
-    }
 
     return () => {
       supabase.removeChannel(presenceChannel);
@@ -197,7 +178,6 @@ export default function Game() {
   const isHost = !!(myGuestId && room && room.host_id === myGuestId);
   useEffect(() => {
     isHostRef.current = isHost;
-    // 當確認自己是房主後，啟動心跳
     if (isHost && roomId && !heartbeatRef.current) {
       const updateHeartbeat = () => {
         supabase.from('rooms')
@@ -213,12 +193,8 @@ export default function Game() {
   useEffect(() => {
     if (!myPlayer || !room) return;
     const handleUnload = () => {
-      // 停止心跳
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
-      // 離開 Presence（讓其他人偵測到）
-      if (presenceChannelRef.current) {
-        presenceChannelRef.current.untrack();
-      }
+      if (presenceChannelRef.current) presenceChannelRef.current.untrack();
       if (myPlayer?.id) supabase.from('players').delete().eq('id', myPlayer.id);
       if (isHostRef.current && room?.id) {
         supabase.from('rooms').update({ game_status: 'cancelled' }).eq('id', room.id);
@@ -259,6 +235,7 @@ export default function Game() {
       const shuffled = shuffleArray(players);
       const spyIds = shuffled.slice(0, spyCount).map(p => p.id);
 
+      // ✅ 詞只寫進各自玩家的 assigned_word，rooms 表不再儲存詞
       await Promise.all(
         players.map(p => {
           const isSpy = spyIds.includes(p.id);
@@ -273,10 +250,9 @@ export default function Game() {
         })
       );
 
+      // ✅ rooms 表不再寫入 civilian_word / spy_word
       await supabase.from('rooms').update({
         game_status: 'speaking',
-        civilian_word,
-        spy_word,
         played_word_ids: new_played_word_ids,
         current_round: 1,
         winner: '',
@@ -374,8 +350,6 @@ export default function Game() {
 
     await supabase.from('rooms').update({
       game_status: 'speaking',
-      civilian_word,
-      spy_word,
       played_word_ids: new_played_word_ids,
       winner: '',
       current_round: 1,
