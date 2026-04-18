@@ -1,22 +1,22 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { supabase } from '@/api/supabaseClient';
+// src/components/game/VotingPhase.jsx
+// 修復 C3（投票只走 RPC）、M4（server-authoritative timer）
+import React, { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Check } from 'lucide-react';
 import PlayerAvatar from './PlayerAvatar';
 import { cn } from '@/lib/utils';
 import { useLang } from '@/lib/LangContext';
+import { submitVote, GameError } from '@/api/gameApi';
 
-const TIMER_SECONDS = 60;
+const FALLBACK_SECONDS = 60;
 
 export default function VotingPhase({ room, players, myPlayer, allVotes, onVoteComplete, isHost }) {
   const [selectedTarget, setSelectedTarget] = useState(null);
-  const [hasVoted, setHasVoted] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(TIMER_SECONDS);
-  const [isTie, setIsTie] = useState(false);
+  const [error, setError] = useState('');
+  const [timeLeft, setTimeLeft] = useState(FALLBACK_SECONDS);
   const voteCompleteCalledRef = useRef(false);
-  const timerRef = useRef(null);
   const { t } = useLang();
 
   const currentRound = room.current_round || 1;
@@ -24,116 +24,81 @@ export default function VotingPhase({ room, players, myPlayer, allVotes, onVoteC
   const roundVotes = allVotes.filter(v => v.round_number === currentRound);
   const votedCount = roundVotes.length;
   const myVote = roundVotes.find(v => v.voter_id === myPlayer?.id);
+  const hasVoted = !!myVote;
 
-  // 重新連線後恢復投票狀態
-  useEffect(() => {
-    if (myVote) {
-      setHasVoted(true);
-      setSelectedTarget(myVote.target_id);
-    }
-  }, [myVote?.id]);
-
-  // ✅ 修復：回合切換時完整重置，包含清除舊 timer
+  // ─── Server timer: 根據 room.voting_ends_at 倒數 ─────────────────────
   useEffect(() => {
     voteCompleteCalledRef.current = false;
-    setTimeLeft(TIMER_SECONDS);
-    setHasVoted(false);
-    setSelectedTarget(null);
-    setIsTie(false);
+    setError('');
+    setSelectedTarget(myVote?.target_id ?? null);
 
-    if (timerRef.current) clearInterval(timerRef.current);
+    const endsAt = room.voting_ends_at ? new Date(room.voting_ends_at).getTime() : null;
 
-    // ✅ 修復：timer 閉包捕捉當下的 allVotes 快照
-    const roundSnapshot = currentRound;
-    timerRef.current = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) {
-          clearInterval(timerRef.current);
-          if (!voteCompleteCalledRef.current && isHost) {
-            voteCompleteCalledRef.current = true;
-            // 用最新的 allVotes 而不是閉包舊值
-            setIsTie(false);
-            onVoteComplete(allVotes.filter(v => v.round_number === roundSnapshot));
-          }
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+    const tick = () => {
+      if (!endsAt) { setTimeLeft(FALLBACK_SECONDS); return; }
+      const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+      setTimeLeft(remaining);
 
-    return () => clearInterval(timerRef.current);
-  }, [currentRound]);
+      if (remaining === 0 && !voteCompleteCalledRef.current && isHost) {
+        voteCompleteCalledRef.current = true;
+        onVoteComplete();
+      }
+    };
 
-  // 全員投完提早結算
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [room.voting_ends_at, currentRound, isHost, onVoteComplete, myVote?.target_id]);
+
+  // ─── 全員投完就結算 ──────────────────────────────────────────────────
   useEffect(() => {
-    if (alivePlayers.length === 0) return;
+    if (alivePlayers.length === 0 || !isHost) return;
     const allVoted = alivePlayers.every(p => roundVotes.some(v => v.voter_id === p.id));
-    if (allVoted && !voteCompleteCalledRef.current && isHost) {
+    if (allVoted && !voteCompleteCalledRef.current) {
       voteCompleteCalledRef.current = true;
-      clearInterval(timerRef.current);
-      onVoteComplete(roundVotes);
+      onVoteComplete();
     }
-  }, [votedCount, alivePlayers.length]);
+  }, [votedCount, alivePlayers.length, isHost, onVoteComplete, roundVotes]);
 
-  // 投票送出
-  const submitVote = async () => {
+  const handleSubmit = async () => {
     if (!selectedTarget || hasVoted || !myPlayer?.is_alive || processing) return;
     setProcessing(true);
-    setHasVoted(true);
-
-    const { data: existing } = await supabase
-      .from('votes')
-      .select('id')
-      .eq('room_id', room.id)
-      .eq('round_number', currentRound)
-      .eq('voter_id', myPlayer.id)
-      .limit(1);
-
-    if (!existing || existing.length === 0) {
-      await supabase.from('votes').insert({
-        room_id: room.id,
-        round_number: currentRound,
-        voter_id: myPlayer.id,
-        target_id: selectedTarget,
-      });
+    setError('');
+    try {
+      await submitVote(room.id, selectedTarget);
+    } catch (e) {
+      if (e instanceof GameError && e.code === 'duplicate') {
+        // DB UNIQUE 擋下來的重複投票；靜默處理，realtime 會同步
+      } else {
+        setError(t.voteFailed || '投票失敗，請重試');
+      }
+    } finally {
+      setProcessing(false);
     }
-
-    setProcessing(false);
   };
 
-  const progressPercent = (timeLeft / TIMER_SECONDS) * 100;
+  const progressPercent = (timeLeft / FALLBACK_SECONDS) * 100;
 
   return (
     <div className="relative min-h-screen flex flex-col px-6 pt-12 pb-8">
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex-1 max-w-sm mx-auto w-full space-y-6"
-      >
+      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+        className="flex-1 max-w-sm mx-auto w-full space-y-6">
         <div className="text-center mb-8">
           <h2 className="text-xl font-bold mb-2">{t.votingPhase}</h2>
           <p className="text-sm text-muted-foreground mb-4">
             {votedCount}/{alivePlayers.length} {t.playersVoted}
           </p>
-          {/* ✅ 新增：平票提示 */}
-          {isTie && (
-            <div className="mb-3 px-4 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-500 text-sm font-medium">
-              平票！沒有人被淘汰，繼續下一輪
-            </div>
-          )}
           <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-amber-500 transition-all duration-1000 ease-linear"
-              style={{ width: `${progressPercent}%` }}
-            />
+            <div className="h-full bg-amber-500 transition-all duration-1000 ease-linear"
+              style={{ width: `${progressPercent}%` }} />
           </div>
-          <p className="text-xs text-muted-foreground mt-1">{timeLeft} 秒</p>
+          <p className="text-xs text-muted-foreground mt-1">{timeLeft} {t.secondsSuffix || '秒'}</p>
         </div>
 
+        {error && <p className="text-sm text-destructive text-center" role="alert">{error}</p>}
+
         {!myPlayer?.is_alive ? (
-          <div className="text-center py-8 text-muted-foreground">
-            <p>{t.youreEliminated}</p>
-          </div>
+          <div className="text-center py-8 text-muted-foreground"><p>{t.youreEliminated}</p></div>
         ) : hasVoted ? (
           <div className="text-center py-8 space-y-2">
             <Check className="w-12 h-12 mx-auto text-primary" />
@@ -144,21 +109,19 @@ export default function VotingPhase({ room, players, myPlayer, allVotes, onVoteC
             <p className="text-sm font-medium text-muted-foreground">{t.chooseSpy}</p>
             <AnimatePresence>
               {alivePlayers.filter(p => p.id !== myPlayer?.id).map((player, i) => (
-                <motion.button
-                  key={player.id}
+                <motion.button key={player.id}
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.05 }}
                   disabled={processing}
-                  onClick={() => !hasVoted && setSelectedTarget(player.id)}
+                  onClick={() => setSelectedTarget(player.id)}
                   className={cn(
                     'w-full flex items-center gap-3 px-4 py-4 rounded-xl transition-all border-2',
                     selectedTarget === player.id
                       ? 'bg-amber-500/20 border-amber-500'
                       : 'bg-secondary/50 border-transparent active:scale-[0.98]',
-                    processing && 'opacity-50 cursor-not-allowed'
-                  )}
-                >
+                    processing && 'opacity-50 cursor-not-allowed',
+                  )}>
                   <PlayerAvatar name={player.username} index={i} />
                   <span className="font-medium flex-1 text-left">{player.username}</span>
                   {selectedTarget === player.id && <Check className="w-5 h-5 text-amber-500" />}
@@ -166,11 +129,8 @@ export default function VotingPhase({ room, players, myPlayer, allVotes, onVoteC
               ))}
             </AnimatePresence>
 
-            <Button
-              onClick={submitVote}
-              disabled={!selectedTarget || processing}
-              className="w-full h-14 text-base font-bold rounded-xl mt-4"
-            >
+            <Button onClick={handleSubmit} disabled={!selectedTarget || processing}
+              className="w-full h-14 text-base font-bold rounded-xl mt-4">
               {processing ? t.voting : t.confirmVote}
             </Button>
           </div>
